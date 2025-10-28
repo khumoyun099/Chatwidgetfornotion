@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Notion ChatGPT Widget</title>
+  <style>
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,'Helvetica Neue',Arial;}
+    .widget { box-sizing:border-box; width:100%; height:100%; display:flex; flex-direction:column; border-radius:8px; border:1px solid #e6e6e6; overflow:hidden; }
+    header{padding:10px 14px; background:#fafafa; border-bottom:1px solid #eee; display:flex; align-items:center; gap:10px;}
+    header h1{font-size:14px;margin:0;}
+    #messages{flex:1; padding:12px; overflow:auto; background:linear-gradient(180deg,#fff,#fbfbfd);}
+    .msg{margin-bottom:10px; max-width:90%;}
+    .user{align-self:flex-end; background:#e6f4ff; padding:8px 10px; border-radius:10px 10px 0 10px;}
+    .bot{align-self:flex-start; background:#f3f3f6; padding:8px 10px; border-radius:10px 10px 10px 0;}
+    .composer{display:flex;padding:10px;border-top:1px solid #eee;gap:8px;background:white;}
+    input[type="text"]{flex:1;padding:10px;border:1px solid #ddd;border-radius:8px;font-size:14px;}
+    button{padding:10px 12px;border-radius:8px;border:0;background:#2563eb;color:white;font-weight:600;cursor:pointer;}
+    button[disabled]{opacity:.5;cursor:default;}
+    .small{font-size:12px;color:#666;margin-left:auto}
+  </style>
+</head>
+<body>
+  <div class="widget" role="application" aria-label="ChatGPT widget">
+    <header>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.486 2 2 6.486 2 12s4.486 10 10 10 10-4.486 10-10S17.514 2 12 2z" fill="#2563eb"/></svg>
+      <h1>ChatGPT Widget</h1>
+      <div class="small">Powered by your serverless proxy</div>
+    </header>
+
+    <div id="messages" aria-live="polite"></div>
+
+    <form id="form" class="composer" onsubmit="return false;">
+      <input id="input" type="text" placeholder="Ask something..." autocomplete="off" />
+      <button id="send">Send</button>
+    </form>
+  </div>
+
+  <script>
+    const messagesEl = document.getElementById('messages');
+    const inputEl = document.getElementById('input');
+    const sendBtn = document.getElementById('send');
+
+    function appendMessage(text, from='bot') {
+      const el = document.createElement('div');
+      el.className = 'msg ' + (from === 'user' ? 'user' : 'bot');
+      el.textContent = text;
+      messagesEl.appendChild(el);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function sendMessage() {
+      const text = inputEl.value.trim();
+      if (!text) return;
+      appendMessage(text, 'user');
+      inputEl.value = '';
+      sendBtn.disabled = true;
+
+      // Show typing indicator
+      const typing = document.createElement('div');
+      typing.className = 'msg bot';
+      typing.textContent = '...';
+      messagesEl.appendChild(typing);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      try {
+        const res = await fetch('/.netlify/functions/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text })
+        });
+
+        if (!res.ok) {
+          const errText = await res.text();
+          throw new Error(errText || 'Server error');
+        }
+
+        const data = await res.json();
+        // remove typing
+        messagesEl.removeChild(typing);
+
+        if (data?.reply) {
+          appendMessage(data.reply, 'bot');
+        } else {
+          appendMessage('No response from server', 'bot');
+        }
+      } catch (err) {
+        // remove typing
+        if (messagesEl.contains(typing)) messagesEl.removeChild(typing);
+        appendMessage('Error: ' + (err.message || err), 'bot');
+        console.error(err);
+      } finally {
+        sendBtn.disabled = false;
+      }
+    }
+
+    sendBtn.addEventListener('click', sendMessage);
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+
+    // Optional: welcome message
+    appendMessage('Hi — ask me anything!', 'bot');
+  </script>
+</body>
+</html>
+
+
+// netlify/functions/chat.js
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'; // Chat Completions endpoint
+
+exports.handler = async (event) => {
+  try {
+    if (event.httpMethod !== 'POST') {
+      return {
+        statusCode: 405,
+        body: 'Method Not Allowed',
+        headers: { 'Content-Type': 'text/plain' }
+      };
+    }
+
+    if (!OPENAI_API_KEY) {
+      return {
+        statusCode: 500,
+        body: JSON.stringify({ error: 'OpenAI API key not configured on server.' }),
+        headers: { 'Content-Type': 'application/json' }
+      };
+    }
+
+    const body = JSON.parse(event.body || '{}');
+    const userMessage = body.message;
+    if (!userMessage) {
+      return { statusCode: 400, body: JSON.stringify({ error: 'No message provided' }), headers: { 'Content-Type': 'application/json' } };
+    }
+
+    // Build OpenAI request payload
+    const payload = {
+      model: 'gpt-4o-mini', // change model as needed
+      messages: [
+        { role: 'system', content: 'You are a helpful assistant. Keep replies concise (max ~200 words).' },
+        { role: 'user', content: userMessage }
+      ],
+      max_tokens: 400,
+      temperature: 0.2
+    };
+
+    const openaiRes = await fetch(OPENAI_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${OPENAI_API_KEY}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!openaiRes.ok) {
+      const errText = await openaiRes.text();
+      return {
+        statusCode: openaiRes.status || 500,
+        body: JSON.stringify({ error: 'OpenAI error', details: errText }),
+        headers: { 'Content-Type': 'application/json' }
+      };
+    }
+
+    const openaiData = await openaiRes.json();
+
+    // Extract assistant reply (depends on API response format)
+    const reply = openaiData?.choices?.[0]?.message?.content ?? openaiData?.choices?.[0]?.text ?? '';
+
+    return {
+      statusCode: 200,
+      headers: {
+        'Content-Type': 'application/json',
+        // allow embedding in iframes (Notion embed)
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'POST, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type',
+        // allow framing (be careful in production)
+        'X-Frame-Options': 'ALLOWALL'
+      },
+      body: JSON.stringify({ reply: reply.trim() })
+    };
+
+  } catch (err) {
+    console.error(err);
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: 'Server error', details: String(err) }),
+      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+    };
+  }
+};
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "ALLOWALL"
+    Content-Security-Policy = "frame-ancestors https://www.notion.so https://notion.*;"
+
