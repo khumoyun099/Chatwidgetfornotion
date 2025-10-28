@@ -23,16 +23,16 @@
 <body>
   <div class="widget" role="application" aria-label="ChatGPT widget">
     <header>
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2C6.486 2 2 6.486 2 12s4.486 10 10 10 10-4.486 10-10S17.514 2 12 2z" fill="#2563eb"/></svg>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 2C6.486 2 2 6.486 2 12s4.486 10 10 10 10-4.486 10-10S17.514 2 12 2z" fill="#2563eb"/></svg>
       <h1>ChatGPT Widget</h1>
       <div class="small">Powered by your serverless proxy</div>
     </header>
 
     <div id="messages" aria-live="polite"></div>
 
-    <form id="form" class="composer" onsubmit="return false;">
+    <form id="form" class="composer">
       <input id="input" type="text" placeholder="Ask something..." autocomplete="off" />
-      <button id="send">Send</button>
+      <button id="send" type="button">Send</button>
     </form>
   </div>
 
@@ -40,6 +40,7 @@
     const messagesEl = document.getElementById('messages');
     const inputEl = document.getElementById('input');
     const sendBtn = document.getElementById('send');
+    const form = document.getElementById('form');
 
     function appendMessage(text, from='bot') {
       const el = document.createElement('div');
@@ -76,16 +77,18 @@
         }
 
         const data = await res.json();
+
         // remove typing
-        messagesEl.removeChild(typing);
+        if (messagesEl.contains(typing)) messagesEl.removeChild(typing);
 
         if (data?.reply) {
           appendMessage(data.reply, 'bot');
+        } else if (data?.error) {
+          appendMessage('Error: ' + data.error, 'bot');
         } else {
           appendMessage('No response from server', 'bot');
         }
       } catch (err) {
-        // remove typing
         if (messagesEl.contains(typing)) messagesEl.removeChild(typing);
         appendMessage('Error: ' + (err.message || err), 'bot');
         console.error(err);
@@ -96,7 +99,10 @@
 
     sendBtn.addEventListener('click', sendMessage);
     inputEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') sendMessage();
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        sendMessage();
+      }
     });
 
     // Optional: welcome message
@@ -104,47 +110,79 @@
   </script>
 </body>
 </html>
+// Netlify Function: netlify/functions/chat.js
+// Expects OPENAI_API_KEY in environment variables (set in Netlify dashboard).
+// Uses OpenAI Chat Completions API (v1/chat/completions).
+// Handles CORS preflight (OPTIONS) and returns JSON with { reply: "..." }.
 
-
-// netlify/functions/chat.js
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'; // Chat Completions endpoint
+const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
 
 exports.handler = async (event) => {
-  try {
-    if (event.httpMethod !== 'POST') {
-      return {
-        statusCode: 405,
-        body: 'Method Not Allowed',
-        headers: { 'Content-Type': 'text/plain' }
-      };
-    }
+  const CORS_HEADERS = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type',
+  };
 
-    if (!OPENAI_API_KEY) {
-      return {
-        statusCode: 500,
-        body: JSON.stringify({ error: 'OpenAI API key not configured on server.' }),
-        headers: { 'Content-Type': 'application/json' }
-      };
-    }
-
-    const body = JSON.parse(event.body || '{}');
-    const userMessage = body.message;
-    if (!userMessage) {
-      return { statusCode: 400, body: JSON.stringify({ error: 'No message provided' }), headers: { 'Content-Type': 'application/json' } };
-    }
-
-    // Build OpenAI request payload
-    const payload = {
-      model: 'gpt-4o-mini', // change model as needed
-      messages: [
-        { role: 'system', content: 'You are a helpful assistant. Keep replies concise (max ~200 words).' },
-        { role: 'user', content: userMessage }
-      ],
-      max_tokens: 400,
-      temperature: 0.2
+  // Handle preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return {
+      statusCode: 204,
+      headers: CORS_HEADERS,
+      body: ''
     };
+  }
 
+  if (event.httpMethod !== 'POST') {
+    return {
+      statusCode: 405,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'text/plain' },
+      body: 'Method Not Allowed'
+    };
+  }
+
+  if (!OPENAI_API_KEY) {
+    return {
+      statusCode: 500,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'OpenAI API key not configured on server.' })
+    };
+  }
+
+  let body;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch (err) {
+    return {
+      statusCode: 400,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Invalid JSON in request body.' })
+    };
+  }
+
+  const userMessage = body.message;
+  if (!userMessage) {
+    return {
+      statusCode: 400,
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'No message provided' })
+    };
+  }
+
+  // Build OpenAI request payload.
+  // NOTE: you can change the model to 'gpt-4o-mini' or other models if your account permits.
+  const payload = {
+    model: 'gpt-3.5-turbo',
+    messages: [
+      { role: 'system', content: 'You are a helpful assistant. Keep replies concise (max ~200 words).' },
+      { role: 'user', content: userMessage }
+    ],
+    max_tokens: 400,
+    temperature: 0.2
+  };
+
+  try {
     const openaiRes = await fetch(OPENAI_URL, {
       method: 'POST',
       headers: {
@@ -158,36 +196,30 @@ exports.handler = async (event) => {
       const errText = await openaiRes.text();
       return {
         statusCode: openaiRes.status || 500,
-        body: JSON.stringify({ error: 'OpenAI error', details: errText }),
-        headers: { 'Content-Type': 'application/json' }
+        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ error: 'OpenAI error', details: errText })
       };
     }
 
     const openaiData = await openaiRes.json();
-
-    // Extract assistant reply (depends on API response format)
     const reply = openaiData?.choices?.[0]?.message?.content ?? openaiData?.choices?.[0]?.text ?? '';
 
     return {
       statusCode: 200,
       headers: {
+        ...CORS_HEADERS,
         'Content-Type': 'application/json',
-        // allow embedding in iframes (Notion embed)
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'POST, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type',
-        // allow framing (be careful in production)
+        // Allow embedding in iframes (Notion embed)
         'X-Frame-Options': 'ALLOWALL'
       },
       body: JSON.stringify({ reply: reply.trim() })
     };
-
   } catch (err) {
-    console.error(err);
+    console.error('Function error:', err);
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: 'Server error', details: String(err) }),
-      headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
+      headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ error: 'Server error', details: String(err) })
     };
   }
 };
@@ -195,9 +227,9 @@ exports.handler = async (event) => {
   publish = "."
   functions = "netlify/functions"
 
+# Allow embedding in Notion (be careful in production)
 [[headers]]
   for = "/*"
   [headers.values]
     X-Frame-Options = "ALLOWALL"
     Content-Security-Policy = "frame-ancestors https://www.notion.so https://notion.*;"
-
